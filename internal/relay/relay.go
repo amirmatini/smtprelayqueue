@@ -12,9 +12,10 @@ import (
 	"sync"
 	"time"
 
-	gosmtp "github.com/emersion/go-smtp"
 	"smtp-relay/internal/config"
 	"smtp-relay/internal/storage"
+
+	gosmtp "github.com/emersion/go-smtp"
 )
 
 // Relay represents the SMTP relay server
@@ -303,12 +304,8 @@ func (s *Session) Data(r io.Reader) error {
 	// Log that message was received
 	log.Printf("Message %s received from %s to %v", msg.ID, msg.From, msg.To)
 
-	// Start background relay process - don't wait for it
-	go func() {
-		// Add a small delay to ensure the SMTP response is sent first
-		time.Sleep(100 * time.Millisecond)
-		s.forwardMessage(msg)
-	}()
+	// Start background relay process - TRULY asynchronous now
+	go s.forwardMessage(msg)
 
 	return nil
 }
@@ -341,14 +338,16 @@ func (s *Session) forwardMessage(msg *storage.Message) {
 
 	log.Printf("Starting to forward message %s to %s:%d", msg.ID, s.backend.config.Outgoing.Host, s.backend.config.Outgoing.Port)
 
-	// Attempt to forward
-	success := s.backend.relay.attemptForward(msg)
+	// Attempt to forward ASYNCHRONOUSLY - don't wait for it
+	go func() {
+		success := s.backend.relay.attemptForward(msg)
 
-	if !success {
-		s.handleForwardError(msg)
-	} else {
-		log.Printf("Message %s forwarded successfully", msg.ID)
-	}
+		if !success {
+			s.handleForwardError(msg)
+		} else {
+			log.Printf("Message %s forwarded successfully", msg.ID)
+		}
+	}()
 }
 
 // handleForwardError handles forwarding errors
@@ -358,7 +357,7 @@ func (s *Session) handleForwardError(msg *storage.Message) {
 		msg.Status = "retrying"
 		msg.RetryAttempt++
 		msg.NextRetry = time.Now().Add(s.backend.config.Retry.InitialDelay)
-		
+
 		// Add retry attempt to history
 		retryAttempt := storage.RetryAttempt{
 			Attempt:   msg.RetryAttempt,
@@ -366,9 +365,9 @@ func (s *Session) handleForwardError(msg *storage.Message) {
 			Error:     msg.Error,
 		}
 		msg.RetryHistory = append(msg.RetryHistory, retryAttempt)
-		
+
 		log.Printf("Message %s scheduled for retry (attempt %d/%d)", msg.ID, msg.RetryAttempt, s.backend.config.Retry.MaxAttempts)
-		
+
 		// Add to retry queue
 		select {
 		case s.backend.relay.retryCh <- msg:
@@ -380,7 +379,7 @@ func (s *Session) handleForwardError(msg *storage.Message) {
 		msg.Status = "failed"
 		log.Printf("Message %s failed permanently after %d attempts", msg.ID, msg.RetryAttempt)
 	}
-	
+
 	if updateErr := s.backend.storage.Update(msg.ID, msg); updateErr != nil {
 		log.Printf("Failed to update message status: %v", updateErr)
 	}
