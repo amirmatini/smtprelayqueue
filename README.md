@@ -20,29 +20,17 @@ A Go-based SMTP relay server that receives emails, stores them with all headers 
 ### Prerequisites
 
 - Go 1.21 or later (for building from source)
-- Docker (for containerized deployment)
 
 ### Quick Installation
 
-#### Using Docker
-
-```bash
-# Pull and run the container
-docker run -d \
-  --name smtp-relay \
-  -p 2525:2525 \
-  -v $(pwd)/config.yaml:/app/config.yaml \
-  -v $(pwd)/messages:/app/messages \
-  -v $(pwd)/logs:/app/logs \
-  yourusername/smtp-relay:latest
-```
+Download the latest binary for your platform from the [GitHub releases](https://github.com/amirmatini/smtprelayqueue/releases) page.
 
 ### Building from Source
 
 ```bash
 # Clone the repository
-git clone <repository-url>
-cd SMTPRelay
+git clone https://github.com/amirmatini/smtprelayqueue.git
+cd smtprelayqueue
 
 # Build the application
 go build -o smtp-relay cmd/smtp-relay/main.go
@@ -74,12 +62,7 @@ sudo systemctl enable smtp-relay
 sudo systemctl start smtp-relay
 ```
 
-### Supported Architectures
 
-The SMTP Relay supports multiple architectures:
-- **Linux**: AMD64, ARM64, ARMv7
-- **macOS**: AMD64, ARM64 (Apple Silicon)
-- **Windows**: AMD64, ARM64
 
 ## Configuration
 

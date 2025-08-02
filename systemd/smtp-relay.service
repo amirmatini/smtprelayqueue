@@ -1,5 +1,6 @@
 [Unit]
 Description=SMTP Relay Service
+Documentation=https://github.com/amirmatini/smtprelayqueue
 After=network.target
 Wants=network.target
 
