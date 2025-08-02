@@ -94,6 +94,10 @@ type RetryConfig struct {
 	MaxDelay          time.Duration `yaml:"max_delay"`
 	BackoffMultiplier float64       `yaml:"backoff_multiplier"`
 	RetryQueueSize    int           `yaml:"retry_queue_size"`
+	// New options for better control
+	CleanupFailedAfter time.Duration `yaml:"cleanup_failed_after"`
+	MaxRetryHistory    int           `yaml:"max_retry_history"`
+	RetryForever       bool          `yaml:"retry_forever"`
 }
 
 // Load loads configuration from a YAML file

@@ -135,6 +135,38 @@ func (r *Relay) saveRetryQueue() error {
 	return nil
 }
 
+// cleanupOldFailedMessages removes old failed messages to prevent storage bloat
+func (r *Relay) cleanupOldFailedMessages() error {
+	if r.config.Retry.CleanupFailedAfter <= 0 {
+		return nil // Cleanup disabled
+	}
+
+	cutoffTime := time.Now().Add(-r.config.Retry.CleanupFailedAfter)
+
+	// Get all failed messages
+	messages, err := r.storage.GetFailedMessages()
+	if err != nil {
+		return fmt.Errorf("failed to get failed messages for cleanup: %w", err)
+	}
+
+	cleaned := 0
+	for _, msg := range messages {
+		if msg.Status == "failed" && msg.Received.Before(cutoffTime) {
+			if err := r.storage.Delete(msg.ID); err != nil {
+				log.Printf("Failed to delete old failed message %s: %v", msg.ID, err)
+			} else {
+				cleaned++
+			}
+		}
+	}
+
+	if cleaned > 0 {
+		log.Printf("Cleaned up %d old failed messages (older than %v)", cleaned, r.config.Retry.CleanupFailedAfter)
+	}
+
+	return nil
+}
+
 // Start starts the relay server
 func (r *Relay) Start() error {
 	log.Printf("Starting SMTP relay on %s:%d", r.config.Incoming.Host, r.config.Incoming.Port)
@@ -181,10 +213,12 @@ func (r *Relay) waitForRetryQueueEmpty() {
 
 // retryWorker processes failed messages for retry
 func (r *Relay) retryWorker() {
-	ticker := time.NewTicker(30 * time.Second)    // Check for retries every 30 seconds
-	saveTicker := time.NewTicker(5 * time.Minute) // Save queue every 5 minutes
+	ticker := time.NewTicker(30 * time.Second)     // Check for retries every 30 seconds
+	saveTicker := time.NewTicker(5 * time.Minute)  // Save queue every 5 minutes
+	cleanupTicker := time.NewTicker(1 * time.Hour) // Cleanup every hour
 	defer ticker.Stop()
 	defer saveTicker.Stop()
+	defer cleanupTicker.Stop()
 
 	for {
 		select {
@@ -206,6 +240,11 @@ func (r *Relay) retryWorker() {
 			// Periodically save retry queue
 			if err := r.saveRetryQueue(); err != nil {
 				log.Printf("Error saving retry queue: %v", err)
+			}
+		case <-cleanupTicker.C:
+			// Periodically cleanup old failed messages
+			if err := r.cleanupOldFailedMessages(); err != nil {
+				log.Printf("Error cleaning up old failed messages: %v", err)
 			}
 		}
 	}
@@ -233,10 +272,16 @@ func (r *Relay) processRetry(msg *storage.Message) {
 		return
 	}
 
-	if msg.RetryAttempt >= r.config.Retry.MaxAttempts {
-		log.Printf("Message %s has exceeded max retry attempts (%d), marking as permanently failed", msg.ID, r.config.Retry.MaxAttempts)
+	// Check if we should retry forever or respect max attempts
+	maxAttempts := r.config.Retry.MaxAttempts
+	if r.config.Retry.RetryForever {
+		maxAttempts = -1 // -1 means no limit
+	}
+
+	if maxAttempts > 0 && msg.RetryAttempt >= maxAttempts {
+		log.Printf("Message %s has exceeded max retry attempts (%d), marking as permanently failed", msg.ID, maxAttempts)
 		msg.Status = "failed"
-		msg.Error = fmt.Sprintf("Exceeded max retry attempts (%d)", r.config.Retry.MaxAttempts)
+		msg.Error = fmt.Sprintf("Exceeded max retry attempts (%d)", maxAttempts)
 		r.storage.Update(msg.ID, msg)
 		return
 	}
@@ -252,7 +297,10 @@ func (r *Relay) processRetry(msg *storage.Message) {
 		return
 	}
 
-	log.Printf("Retrying message %s (attempt %d/%d)", msg.ID, msg.RetryAttempt+1, r.config.Retry.MaxAttempts)
+	log.Printf("Retrying message %s (attempt %d)", msg.ID, msg.RetryAttempt+1)
+	if maxAttempts > 0 {
+		log.Printf(" (max attempts: %d)", maxAttempts)
+	}
 
 	// Attempt to forward the message
 	success := r.attemptForward(msg)
@@ -266,13 +314,18 @@ func (r *Relay) processRetry(msg *storage.Message) {
 		msg.RetryAttempt++
 		msg.Status = "retrying"
 
-		// Add retry attempt to history
+		// Add retry attempt to history (with limit)
 		retryAttempt := storage.RetryAttempt{
 			Attempt:   msg.RetryAttempt,
 			Timestamp: time.Now(),
 			Error:     msg.Error,
 		}
 		msg.RetryHistory = append(msg.RetryHistory, retryAttempt)
+
+		// Limit retry history size
+		if r.config.Retry.MaxRetryHistory > 0 && len(msg.RetryHistory) > r.config.Retry.MaxRetryHistory {
+			msg.RetryHistory = msg.RetryHistory[len(msg.RetryHistory)-r.config.Retry.MaxRetryHistory:]
+		}
 
 		r.storage.Update(msg.ID, msg)
 
@@ -489,13 +542,19 @@ func (s *Session) forwardMessage(msg *storage.Message) {
 
 // handleForwardError handles forwarding errors
 func (s *Session) handleForwardError(msg *storage.Message) {
-	if s.backend.config.Retry.Enabled && msg.RetryAttempt < s.backend.config.Retry.MaxAttempts {
+	// Check if we should retry forever or respect max attempts
+	maxAttempts := s.backend.config.Retry.MaxAttempts
+	if s.backend.config.Retry.RetryForever {
+		maxAttempts = -1 // -1 means no limit
+	}
+
+	if s.backend.config.Retry.Enabled && (maxAttempts < 0 || msg.RetryAttempt < maxAttempts) {
 		// Schedule for retry
 		msg.Status = "retrying"
 		msg.RetryAttempt++
 		msg.NextRetry = time.Now().Add(s.backend.config.Retry.InitialDelay)
 
-		// Add retry attempt to history
+		// Add retry attempt to history (with limit)
 		retryAttempt := storage.RetryAttempt{
 			Attempt:   msg.RetryAttempt,
 			Timestamp: time.Now(),
@@ -503,7 +562,15 @@ func (s *Session) handleForwardError(msg *storage.Message) {
 		}
 		msg.RetryHistory = append(msg.RetryHistory, retryAttempt)
 
-		log.Printf("Message %s scheduled for retry (attempt %d/%d)", msg.ID, msg.RetryAttempt, s.backend.config.Retry.MaxAttempts)
+		// Limit retry history size
+		if s.backend.config.Retry.MaxRetryHistory > 0 && len(msg.RetryHistory) > s.backend.config.Retry.MaxRetryHistory {
+			msg.RetryHistory = msg.RetryHistory[len(msg.RetryHistory)-s.backend.config.Retry.MaxRetryHistory:]
+		}
+
+		log.Printf("Message %s scheduled for retry (attempt %d)", msg.ID, msg.RetryAttempt)
+		if maxAttempts > 0 {
+			log.Printf(" (max attempts: %d)", maxAttempts)
+		}
 
 		// Add to retry queue
 		select {

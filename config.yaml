@@ -84,3 +84,7 @@ retry:
   max_delay: "5m"
   backoff_multiplier: 2.0
   retry_queue_size: 100
+  # New options for better control
+  cleanup_failed_after: "24h"  # Auto-delete failed messages after 24 hours
+  max_retry_history: 10        # Limit retry history entries per message
+  retry_forever: false         # Allow infinite retries (use with caution)
