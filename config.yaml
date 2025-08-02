@@ -1,0 +1,78 @@
+# SMTP Relay Example Configuration
+# Copy this file to config.yaml and modify as needed
+
+# Incoming SMTP Server Configuration
+incoming:
+  host: "0.0.0.0"
+  port: 2525
+  tls:
+    enabled: false
+    cert_file: ""
+    key_file: ""
+  auth:
+    enabled: false
+    username: ""
+    password: ""
+    method: "plain" # plain, login, cram-md5
+
+# Outgoing SMTP Server Configuration
+# Example for Gmail
+outgoing:
+  host: "smtp.gmail.com"
+  port: 587
+  tls:
+    enabled: true
+    mode: "starttls" # starttls, ssl, none
+    skip_verify: false
+    cert_file: ""
+    key_file: ""
+  auth:
+    enabled: true
+    username: "your-email@gmail.com"
+    password: "your-app-password" # Use App Password, not regular password
+    method: "plain" # plain, login, cram-md5
+
+# Example for Outlook/Hotmail
+# outgoing:
+#   host: "smtp-mail.outlook.com"
+#   port: 587
+#   tls:
+#     enabled: true
+#     mode: "starttls"
+#     skip_verify: false
+#   auth:
+#     enabled: true
+#     username: "your-email@outlook.com"
+#     password: "your-password"
+#     method: "plain"
+
+# Example for local SMTP server (no auth, no TLS)
+# outgoing:
+#   host: "localhost"
+#   port: 25
+#   tls:
+#     enabled: false
+#     mode: "none"
+#   auth:
+#     enabled: false
+
+# Storage Configuration
+storage:
+  type: "file" # file, memory
+  file:
+    path: "./messages"
+    max_size: "100MB"
+  memory:
+    max_messages: 1000
+
+# Logging Configuration
+logging:
+  level: "info" # debug, info, warn, error
+  format: "text" # json, text
+  file: "./logs/smtp-relay.log"
+
+# Rate Limiting
+rate_limit:
+  enabled: true
+  requests_per_minute: 60
+  burst: 10 

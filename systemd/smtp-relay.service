@@ -1,0 +1,33 @@
+[Unit]
+Description=SMTP Relay Service
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=smtp-relay
+Group=smtp-relay
+WorkingDirectory=/opt/smtp-relay
+ExecStart=/opt/smtp-relay/smtp-relay -config /opt/smtp-relay/config.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=smtp-relay
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/smtp-relay/messages /opt/smtp-relay/logs
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LimitNOFILE=65536
+LimitNPROC=4096
+Environment=GOMAXPROCS=2
+
+[Install]
+WantedBy=multi-user.target 

@@ -1,0 +1,17 @@
+Subject: Test Email from SMTP Relay
+From: test@example.com
+To: recipient@example.com
+Date: Mon, 01 Jan 2024 12:00:00 +0000
+Message-ID: <test123@example.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+
+This is a test email sent through the SMTP relay.
+
+The SMTP relay should:
+1. Receive this email
+2. Store it with all headers and content
+3. Forward it to the configured target SMTP server
+
+Best regards,
+SMTP Relay Test 
