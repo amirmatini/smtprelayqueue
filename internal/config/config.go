@@ -6,6 +6,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -17,6 +18,7 @@ type Config struct {
 	Storage   StorageConfig   `yaml:"storage"`
 	Logging   LoggingConfig   `yaml:"logging"`
 	RateLimit RateLimitConfig `yaml:"rate_limit"`
+	Retry     RetryConfig     `yaml:"retry"`
 }
 
 // IncomingConfig represents the incoming SMTP server configuration
@@ -84,6 +86,16 @@ type RateLimitConfig struct {
 	Burst             int  `yaml:"burst"`
 }
 
+// RetryConfig represents retry configuration for failed emails
+type RetryConfig struct {
+	Enabled           bool          `yaml:"enabled"`
+	MaxAttempts       int           `yaml:"max_attempts"`
+	InitialDelay      time.Duration `yaml:"initial_delay"`
+	MaxDelay          time.Duration `yaml:"max_delay"`
+	BackoffMultiplier float64       `yaml:"backoff_multiplier"`
+	RetryQueueSize    int           `yaml:"retry_queue_size"`
+}
+
 // Load loads configuration from a YAML file
 func Load(filename string) (*Config, error) {
 	data, err := os.ReadFile(filename)
@@ -139,6 +151,25 @@ func validate(config *Config) error {
 
 	if config.Storage.Type != "file" && config.Storage.Type != "memory" {
 		return fmt.Errorf("invalid storage type: %s", config.Storage.Type)
+	}
+
+	// Validate retry configuration
+	if config.Retry.Enabled {
+		if config.Retry.MaxAttempts <= 0 {
+			return fmt.Errorf("retry max_attempts must be greater than 0")
+		}
+		if config.Retry.InitialDelay < 0 {
+			return fmt.Errorf("retry initial_delay cannot be negative")
+		}
+		if config.Retry.MaxDelay < config.Retry.InitialDelay {
+			return fmt.Errorf("retry max_delay must be greater than or equal to initial_delay")
+		}
+		if config.Retry.BackoffMultiplier <= 0 {
+			return fmt.Errorf("retry backoff_multiplier must be greater than 0")
+		}
+		if config.Retry.RetryQueueSize <= 0 {
+			return fmt.Errorf("retry queue_size must be greater than 0")
+		}
 	}
 
 	return nil

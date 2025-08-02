@@ -13,6 +13,7 @@ A Go-based SMTP relay server that receives emails, stores them with all headers 
 - **Flexible Storage**: File-based or in-memory storage
 - **Configuration**: YAML-based configuration
 - **Rate Limiting**: Built-in rate limiting support
+- **Retry Mechanism**: Configurable retry logic for failed emails with exponential backoff
 - **Robust Error Handling**: Comprehensive error handling with panic recovery
 
 ## Installation
@@ -102,6 +103,13 @@ The application uses a YAML configuration file. See `config.yaml` for a complete
 - `level`: Log level (debug, info, warn, error)
 - `format`: Log format (json, text)
 - `file`: Log file path
+#### Retry Configuration
+- `enabled`: Enable retry mechanism for failed emails
+- `max_attempts`: Maximum number of retry attempts
+- `initial_delay`: Initial delay before first retry (e.g., "5s", "1m")
+- `max_delay`: Maximum delay between retries (e.g., "5m", "1h")
+- `backoff_multiplier`: Multiplier for exponential backoff (e.g., 2.0)
+- `retry_queue_size`: Size of the retry queue
 
 #### Rate Limiting
 - `enabled`: Enable rate limiting
@@ -155,6 +163,14 @@ storage:
 
 # Logging
 logging:
+# Retry Configuration
+retry:
+  enabled: true
+  max_attempts: 3
+  initial_delay: "5s"
+  max_delay: "5m"
+  backoff_multiplier: 2.0
+  retry_queue_size: 100
   level: "info"
   format: "text"
   file: "./logs/smtp-relay.log"
@@ -182,6 +198,33 @@ The SMTP relay is designed to provide fast response times by processing messages
 - **Fast Client Response**: No waiting for slow target servers
 - **No Timeouts**: Clients don't experience connection timeouts
 - **Concurrent Processing**: Multiple emails can be processed simultaneously
+## Retry Mechanism
+
+The SMTP relay includes a configurable retry mechanism for failed emails:
+
+### How Retry Works
+
+1. **Initial Failure**: When an email fails to forward, it is marked as "retrying"
+2. **Retry Scheduling**: Failed emails are scheduled for retry with exponential backoff
+3. **Retry Processing**: A background worker processes retry attempts
+4. **Success or Permanent Failure**: After max attempts, emails are marked as permanently failed
+
+### Retry Configuration
+
+- **Max Attempts**: Configurable number of retry attempts (default: 3)
+- **Exponential Backoff**: Delay increases with each retry attempt
+- **Queue Management**: Failed emails are queued for retry processing
+- **Status Tracking**: Each retry attempt is logged and tracked
+
+### Retry Status Flow
+
+```
+received → forwarding → [SUCCESS] → forwarded
+                ↓
+            [FAILURE] → retrying → [RETRY SUCCESS] → forwarded
+                ↓
+            [RETRY FAILURE] → retrying → ... → failed (after max attempts)
+```
 - **Reliable**: Failed forwarding doesn't affect client experience
 - **Observable**: All status changes are logged and stored
 

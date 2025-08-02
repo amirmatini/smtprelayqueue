@@ -76,3 +76,11 @@ rate_limit:
   enabled: true
   requests_per_minute: 60
   burst: 10 
+# Retry Configuration
+retry:
+  enabled: true
+  max_attempts: 3
+  initial_delay: "5s"
+  max_delay: "5m"
+  backoff_multiplier: 2.0
+  retry_queue_size: 100

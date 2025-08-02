@@ -16,15 +16,25 @@ import (
 
 // Message represents a stored email message
 type Message struct {
-	ID        string            `json:"id"`
-	From      string            `json:"from"`
-	To        []string          `json:"to"`
-	Headers   map[string]string `json:"headers"`
-	Body      []byte            `json:"body"`
-	Received  time.Time         `json:"received"`
-	Forwarded time.Time         `json:"forwarded,omitempty"`
-	Status    string            `json:"status"` // received, forwarded, failed
-	Error     string            `json:"error,omitempty"`
+	ID           string            `json:"id"`
+	From         string            `json:"from"`
+	To           []string          `json:"to"`
+	Headers      map[string]string `json:"headers"`
+	Body         []byte            `json:"body"`
+	Received     time.Time         `json:"received"`
+	Forwarded    time.Time         `json:"forwarded,omitempty"`
+	Status       string            `json:"status"` // received, forwarding, forwarded, failed, retrying
+	Error        string            `json:"error,omitempty"`
+	RetryAttempt int               `json:"retry_attempt,omitempty"`
+	NextRetry    time.Time         `json:"next_retry,omitempty"`
+	RetryHistory []RetryAttempt    `json:"retry_history,omitempty"`
+}
+
+// RetryAttempt represents a single retry attempt
+type RetryAttempt struct {
+	Attempt   int       `json:"attempt"`
+	Timestamp time.Time `json:"timestamp"`
+	Error     string    `json:"error"`
 }
 
 // Storage interface defines the methods for message storage
@@ -34,6 +44,7 @@ type Storage interface {
 	List(limit int) ([]*Message, error)
 	Update(id string, msg *Message) error
 	Delete(id string) error
+	GetFailedMessages() ([]*Message, error)
 	Close() error
 }
 
@@ -131,21 +142,17 @@ func (fs *FileStorage) List(limit int) ([]*Message, error) {
 	count := 0
 
 	for _, file := range files {
-		if count >= limit {
+		if count >= limit && limit > 0 {
 			break
 		}
 
-		if filepath.Ext(file.Name()) != ".json" {
-			continue
+		if filepath.Ext(file.Name()) == ".json" {
+			id := file.Name()[:len(file.Name())-5] // Remove .json extension
+			if msg, err := fs.Get(id); err == nil {
+				messages = append(messages, msg)
+				count++
+			}
 		}
-
-		msg, err := fs.Get(file.Name()[:len(file.Name())-5]) // Remove .json extension
-		if err != nil {
-			continue // Skip corrupted files
-		}
-
-		messages = append(messages, msg)
-		count++
 	}
 
 	return messages, nil
@@ -167,19 +174,44 @@ func (fs *FileStorage) Close() error {
 	return nil
 }
 
+func (fs *FileStorage) GetFailedMessages() ([]*Message, error) {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+
+	files, err := os.ReadDir(fs.path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read storage directory: %w", err)
+	}
+
+	var failedMessages []*Message
+
+	for _, file := range files {
+		if filepath.Ext(file.Name()) == ".json" {
+			id := file.Name()[:len(file.Name())-5] // Remove .json extension
+			if msg, err := fs.Get(id); err == nil {
+				if msg.Status == "failed" || msg.Status == "retrying" {
+					failedMessages = append(failedMessages, msg)
+				}
+			}
+		}
+	}
+
+	return failedMessages, nil
+}
+
 // MemoryStorage methods
 func (ms *MemoryStorage) Store(msg *Message) error {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 
-	if len(ms.messages) >= ms.maxCount {
-		// Remove oldest message
+	if len(ms.messages) >= ms.maxCount && ms.maxCount > 0 {
+		// Remove oldest message if at capacity
 		var oldestID string
 		var oldestTime time.Time
 		for id, message := range ms.messages {
-			if oldestTime.IsZero() || message.Received.Before(oldestTime) {
-				oldestTime = message.Received
+			if oldestID == "" || message.Received.Before(oldestTime) {
 				oldestID = id
+				oldestTime = message.Received
 			}
 		}
 		if oldestID != "" {
@@ -211,7 +243,7 @@ func (ms *MemoryStorage) List(limit int) ([]*Message, error) {
 	count := 0
 
 	for _, msg := range ms.messages {
-		if count >= limit {
+		if count >= limit && limit > 0 {
 			break
 		}
 		messages = append(messages, msg)
@@ -237,10 +269,29 @@ func (ms *MemoryStorage) Delete(id string) error {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 
+	if _, exists := ms.messages[id]; !exists {
+		return fmt.Errorf("message not found: %s", id)
+	}
+
 	delete(ms.messages, id)
 	return nil
 }
 
 func (ms *MemoryStorage) Close() error {
 	return nil
+}
+
+func (ms *MemoryStorage) GetFailedMessages() ([]*Message, error) {
+	ms.mu.RLock()
+	defer ms.mu.RUnlock()
+
+	var failedMessages []*Message
+
+	for _, msg := range ms.messages {
+		if msg.Status == "failed" || msg.Status == "retrying" {
+			failedMessages = append(failedMessages, msg)
+		}
+	}
+
+	return failedMessages, nil
 }

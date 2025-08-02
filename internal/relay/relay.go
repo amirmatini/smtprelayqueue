@@ -4,7 +4,6 @@
 package relay
 
 import (
-	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
@@ -13,10 +12,9 @@ import (
 	"sync"
 	"time"
 
+	gosmtp "github.com/emersion/go-smtp"
 	"smtp-relay/internal/config"
 	"smtp-relay/internal/storage"
-
-	gosmtp "github.com/emersion/go-smtp"
 )
 
 // Relay represents the SMTP relay server
@@ -26,70 +24,213 @@ type Relay struct {
 	server  *gosmtp.Server
 	mu      sync.RWMutex
 	stopCh  chan struct{}
+	retryCh chan *storage.Message
 }
 
-// New creates a new SMTP relay
+// New creates a new relay instance
 func New(cfg *config.Config, store storage.Storage) (*Relay, error) {
+	relay := &Relay{
+		config:  cfg,
+		storage: store,
+		stopCh:  make(chan struct{}),
+		retryCh: make(chan *storage.Message, cfg.Retry.RetryQueueSize),
+	}
+
 	backend := &Backend{
 		config:  cfg,
 		storage: store,
+		relay:   relay,
 	}
 
 	server := gosmtp.NewServer(backend)
 	server.Addr = fmt.Sprintf("%s:%d", cfg.Incoming.Host, cfg.Incoming.Port)
-	server.Domain = "localhost"
+	server.Domain = cfg.Incoming.Host
 	server.ReadTimeout = 10 * time.Second
 	server.WriteTimeout = 10 * time.Second
 	server.MaxMessageBytes = 1024 * 1024 * 10 // 10MB
 	server.MaxRecipients = 50
 
-	// Configure TLS if enabled
-	if cfg.Incoming.TLS.Enabled {
-		cert, err := tls.LoadX509KeyPair(cfg.Incoming.TLS.CertFile, cfg.Incoming.TLS.KeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load TLS certificate: %w", err)
-		}
+	relay.server = server
 
-		server.TLSConfig = &tls.Config{
-			Certificates: []tls.Certificate{cert},
-		}
+	// Start retry worker if retry is enabled
+	if cfg.Retry.Enabled {
+		go relay.retryWorker()
 	}
 
-	return &Relay{
-		config:  cfg,
-		storage: store,
-		server:  server,
-		stopCh:  make(chan struct{}),
-	}, nil
+	return relay, nil
 }
 
-// Start starts the SMTP relay server
+// Start starts the relay server
 func (r *Relay) Start() error {
-	go func() {
-		if r.config.Incoming.TLS.Enabled {
-			if err := r.server.ListenAndServeTLS(); err != nil {
-				log.Printf("SMTP server error: %v", err)
-			}
-		} else {
-			if err := r.server.ListenAndServe(); err != nil {
-				log.Printf("SMTP server error: %v", err)
-			}
-		}
-	}()
-
-	return nil
+	log.Printf("Starting SMTP relay on %s:%d", r.config.Incoming.Host, r.config.Incoming.Port)
+	return r.server.ListenAndServe()
 }
 
-// Stop stops the SMTP relay server
+// Stop stops the relay server
 func (r *Relay) Stop() error {
 	close(r.stopCh)
 	return r.server.Close()
+}
+
+// retryWorker processes failed messages for retry
+func (r *Relay) retryWorker() {
+	ticker := time.NewTicker(30 * time.Second) // Check for retries every 30 seconds
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-r.stopCh:
+			return
+		case msg := <-r.retryCh:
+			r.processRetry(msg)
+		case <-ticker.C:
+			r.checkForRetries()
+		}
+	}
+}
+
+// processRetry attempts to retry a failed message
+func (r *Relay) processRetry(msg *storage.Message) {
+	if !r.config.Retry.Enabled {
+		return
+	}
+
+	if msg.RetryAttempt >= r.config.Retry.MaxAttempts {
+		log.Printf("Message %s has exceeded max retry attempts (%d), marking as permanently failed", msg.ID, r.config.Retry.MaxAttempts)
+		msg.Status = "failed"
+		msg.Error = fmt.Sprintf("Exceeded max retry attempts (%d)", r.config.Retry.MaxAttempts)
+		r.storage.Update(msg.ID, msg)
+		return
+	}
+
+	// Check if it's time to retry
+	if time.Now().Before(msg.NextRetry) {
+		// Put it back in the queue for later
+		select {
+		case r.retryCh <- msg:
+		default:
+			log.Printf("Retry queue full, will retry message %s later", msg.ID)
+		}
+		return
+	}
+
+	log.Printf("Retrying message %s (attempt %d/%d)", msg.ID, msg.RetryAttempt+1, r.config.Retry.MaxAttempts)
+
+	// Attempt to forward the message
+	success := r.attemptForward(msg)
+
+	if success {
+		log.Printf("Message %s retry successful", msg.ID)
+	} else {
+		// Calculate next retry delay
+		delay := r.calculateRetryDelay(msg.RetryAttempt)
+		msg.NextRetry = time.Now().Add(delay)
+		msg.RetryAttempt++
+		msg.Status = "retrying"
+
+		// Add retry attempt to history
+		retryAttempt := storage.RetryAttempt{
+			Attempt:   msg.RetryAttempt,
+			Timestamp: time.Now(),
+			Error:     msg.Error,
+		}
+		msg.RetryHistory = append(msg.RetryHistory, retryAttempt)
+
+		r.storage.Update(msg.ID, msg)
+
+		// Put back in retry queue
+		select {
+		case r.retryCh <- msg:
+		default:
+			log.Printf("Retry queue full, will retry message %s later", msg.ID)
+		}
+	}
+}
+
+// checkForRetries checks for messages that are ready to be retried
+func (r *Relay) checkForRetries() {
+	if !r.config.Retry.Enabled {
+		return
+	}
+
+	failedMessages, err := r.storage.GetFailedMessages()
+	if err != nil {
+		log.Printf("Failed to get failed messages for retry: %v", err)
+		return
+	}
+
+	for _, msg := range failedMessages {
+		if msg.Status == "retrying" && time.Now().After(msg.NextRetry) {
+			select {
+			case r.retryCh <- msg:
+			default:
+				log.Printf("Retry queue full, skipping message %s", msg.ID)
+			}
+		}
+	}
+}
+
+// calculateRetryDelay calculates the delay for the next retry attempt
+func (r *Relay) calculateRetryDelay(attempt int) time.Duration {
+	delay := r.config.Retry.InitialDelay
+	for i := 0; i < attempt; i++ {
+		delay = time.Duration(float64(delay) * r.config.Retry.BackoffMultiplier)
+		if delay > r.config.Retry.MaxDelay {
+			delay = r.config.Retry.MaxDelay
+			break
+		}
+	}
+	return delay
+}
+
+// attemptForward attempts to forward a message and returns success status
+func (r *Relay) attemptForward(msg *storage.Message) bool {
+	addr := fmt.Sprintf("%s:%d", r.config.Outgoing.Host, r.config.Outgoing.Port)
+
+	// Create authentication if required
+	var auth smtp.Auth
+	if r.config.Outgoing.Auth.Enabled {
+		switch r.config.Outgoing.Auth.Method {
+		case "plain":
+			auth = smtp.PlainAuth("", r.config.Outgoing.Auth.Username, r.config.Outgoing.Auth.Password, r.config.Outgoing.Host)
+		case "login":
+			auth = smtp.PlainAuth("", r.config.Outgoing.Auth.Username, r.config.Outgoing.Auth.Password, r.config.Outgoing.Host)
+		default:
+			auth = smtp.PlainAuth("", r.config.Outgoing.Auth.Username, r.config.Outgoing.Auth.Password, r.config.Outgoing.Host)
+		}
+	}
+
+	// Send email using net/smtp with timeout
+	done := make(chan error, 1)
+	go func() {
+		done <- smtp.SendMail(addr, auth, msg.From, msg.To, msg.Body)
+	}()
+
+	// Wait for completion with timeout
+	select {
+	case err := <-done:
+		if err != nil {
+			msg.Error = err.Error()
+			return false
+		}
+	case <-time.After(30 * time.Second): // 30 second timeout
+		msg.Error = "forwarding timeout after 30 seconds"
+		return false
+	}
+
+	// Success - update message status
+	msg.Status = "forwarded"
+	msg.Forwarded = time.Now()
+	msg.Error = ""
+	r.storage.Update(msg.ID, msg)
+	return true
 }
 
 // Backend implements the SMTP backend
 type Backend struct {
 	config  *config.Config
 	storage storage.Storage
+	relay   *Relay
 }
 
 // NewSession creates a new SMTP session
@@ -111,19 +252,19 @@ func (s *Session) AuthPlain(username, password string) error {
 	}
 
 	if username != s.backend.config.Incoming.Auth.Username || password != s.backend.config.Incoming.Auth.Password {
-		return gosmtp.ErrAuthFailed
+		return fmt.Errorf("invalid credentials")
 	}
 
 	return nil
 }
 
-// Mail handles the MAIL FROM command
+// Mail handles the MAIL command
 func (s *Session) Mail(from string, opts *gosmtp.MailOptions) error {
 	s.from = from
 	return nil
 }
 
-// Rcpt handles the RCPT TO command
+// Rcpt handles the RCPT command
 func (s *Session) Rcpt(to string, opts *gosmtp.RcptOptions) error {
 	s.to = append(s.to, to)
 	return nil
@@ -142,13 +283,15 @@ func (s *Session) Data(r io.Reader) error {
 
 	// Create message
 	msg := &storage.Message{
-		ID:       generateID(),
-		From:     s.from,
-		To:       s.to,
-		Headers:  headers,
-		Body:     data,
-		Received: time.Now(),
-		Status:   "received",
+		ID:           generateID(),
+		From:         s.from,
+		To:           s.to,
+		Headers:      headers,
+		Body:         data,
+		Received:     time.Now(),
+		Status:       "received",
+		RetryAttempt: 0,
+		RetryHistory: []storage.RetryAttempt{},
 	}
 
 	// Store message immediately
@@ -181,12 +324,12 @@ func (s *Session) Logout() error {
 	return nil
 }
 
-// forwardMessage forwards a message to the target SMTP server using net/smtp
+// forwardMessage forwards a message to the target SMTP server
 func (s *Session) forwardMessage(msg *storage.Message) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("Panic in forwardMessage for %s: %v", msg.ID, r)
-			s.handleForwardError(msg, fmt.Errorf("panic in forwarding: %v", r))
+			s.handleForwardError(msg)
 		}
 	}()
 
@@ -198,58 +341,49 @@ func (s *Session) forwardMessage(msg *storage.Message) {
 
 	log.Printf("Starting to forward message %s to %s:%d", msg.ID, s.backend.config.Outgoing.Host, s.backend.config.Outgoing.Port)
 
-	addr := fmt.Sprintf("%s:%d", s.backend.config.Outgoing.Host, s.backend.config.Outgoing.Port)
+	// Attempt to forward
+	success := s.backend.relay.attemptForward(msg)
 
-	// Create authentication if required
-	var auth smtp.Auth
-	if s.backend.config.Outgoing.Auth.Enabled {
-		switch s.backend.config.Outgoing.Auth.Method {
-		case "plain":
-			auth = smtp.PlainAuth("", s.backend.config.Outgoing.Auth.Username, s.backend.config.Outgoing.Auth.Password, s.backend.config.Outgoing.Host)
-		case "login":
-			// LoginAuth is not available in older Go versions, use PlainAuth instead
-			auth = smtp.PlainAuth("", s.backend.config.Outgoing.Auth.Username, s.backend.config.Outgoing.Auth.Password, s.backend.config.Outgoing.Host)
-		default:
-			auth = smtp.PlainAuth("", s.backend.config.Outgoing.Auth.Username, s.backend.config.Outgoing.Auth.Password, s.backend.config.Outgoing.Host)
-		}
+	if !success {
+		s.handleForwardError(msg)
+	} else {
+		log.Printf("Message %s forwarded successfully", msg.ID)
 	}
-
-	// Send email using net/smtp with timeout
-	done := make(chan error, 1)
-	go func() {
-		done <- smtp.SendMail(addr, auth, msg.From, msg.To, msg.Body)
-	}()
-
-	// Wait for completion with timeout
-	select {
-	case err := <-done:
-		if err != nil {
-			s.handleForwardError(msg, err)
-			return
-		}
-	case <-time.After(30 * time.Second): // 30 second timeout
-		s.handleForwardError(msg, fmt.Errorf("forwarding timeout after 30 seconds"))
-		return
-	}
-
-	// Update status to forwarded
-	msg.Status = "forwarded"
-	msg.Forwarded = time.Now()
-	if err := s.backend.storage.Update(msg.ID, msg); err != nil {
-		log.Printf("Failed to update message status to forwarded: %v", err)
-	}
-
-	log.Printf("Message %s forwarded successfully", msg.ID)
 }
 
 // handleForwardError handles forwarding errors
-func (s *Session) handleForwardError(msg *storage.Message, err error) {
-	msg.Status = "failed"
-	msg.Error = err.Error()
-	if updateErr := s.backend.storage.Update(msg.ID, msg); updateErr != nil {
-		log.Printf("Failed to update message status to failed: %v", updateErr)
+func (s *Session) handleForwardError(msg *storage.Message) {
+	if s.backend.config.Retry.Enabled && msg.RetryAttempt < s.backend.config.Retry.MaxAttempts {
+		// Schedule for retry
+		msg.Status = "retrying"
+		msg.RetryAttempt++
+		msg.NextRetry = time.Now().Add(s.backend.config.Retry.InitialDelay)
+		
+		// Add retry attempt to history
+		retryAttempt := storage.RetryAttempt{
+			Attempt:   msg.RetryAttempt,
+			Timestamp: time.Now(),
+			Error:     msg.Error,
+		}
+		msg.RetryHistory = append(msg.RetryHistory, retryAttempt)
+		
+		log.Printf("Message %s scheduled for retry (attempt %d/%d)", msg.ID, msg.RetryAttempt, s.backend.config.Retry.MaxAttempts)
+		
+		// Add to retry queue
+		select {
+		case s.backend.relay.retryCh <- msg:
+		default:
+			log.Printf("Retry queue full, will retry message %s later", msg.ID)
+		}
+	} else {
+		// Mark as permanently failed
+		msg.Status = "failed"
+		log.Printf("Message %s failed permanently after %d attempts", msg.ID, msg.RetryAttempt)
 	}
-	log.Printf("Failed to forward message %s: %v", msg.ID, err)
+	
+	if updateErr := s.backend.storage.Update(msg.ID, msg); updateErr != nil {
+		log.Printf("Failed to update message status: %v", updateErr)
+	}
 }
 
 // Helper functions
