@@ -45,6 +45,8 @@ type Storage interface {
 	Update(id string, msg *Message) error
 	Delete(id string) error
 	GetFailedMessages() ([]*Message, error)
+	SaveRetryQueue(messages []*Message) error
+	LoadRetryQueue() ([]*Message, error)
 	Close() error
 }
 
@@ -199,6 +201,48 @@ func (fs *FileStorage) GetFailedMessages() ([]*Message, error) {
 	return failedMessages, nil
 }
 
+func (fs *FileStorage) SaveRetryQueue(messages []*Message) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	// Save retry queue to a special file
+	filename := filepath.Join(fs.path, "retry_queue.json")
+
+	data, err := json.MarshalIndent(messages, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal retry queue: %w", err)
+	}
+
+	if err := os.WriteFile(filename, data, 0644); err != nil {
+		return fmt.Errorf("failed to save retry queue: %w", err)
+	}
+
+	return nil
+}
+
+func (fs *FileStorage) LoadRetryQueue() ([]*Message, error) {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+
+	filename := filepath.Join(fs.path, "retry_queue.json")
+
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// No retry queue file exists, return empty slice
+			return []*Message{}, nil
+		}
+		return nil, fmt.Errorf("failed to read retry queue: %w", err)
+	}
+
+	var messages []*Message
+	if err := json.Unmarshal(data, &messages); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal retry queue: %w", err)
+	}
+
+	return messages, nil
+}
+
 // MemoryStorage methods
 func (ms *MemoryStorage) Store(msg *Message) error {
 	ms.mu.Lock()
@@ -294,4 +338,16 @@ func (ms *MemoryStorage) GetFailedMessages() ([]*Message, error) {
 	}
 
 	return failedMessages, nil
+}
+
+func (ms *MemoryStorage) SaveRetryQueue(messages []*Message) error {
+	// For memory storage, we don't need to persist the queue
+	// as it will be lost on restart anyway
+	return nil
+}
+
+func (ms *MemoryStorage) LoadRetryQueue() ([]*Message, error) {
+	// For memory storage, we can't load a queue from restart
+	// as it's not persisted, so return empty slice
+	return []*Message{}, nil
 }

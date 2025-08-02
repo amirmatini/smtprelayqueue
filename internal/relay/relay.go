@@ -55,10 +55,84 @@ func New(cfg *config.Config, store storage.Storage) (*Relay, error) {
 
 	// Start retry worker if retry is enabled
 	if cfg.Retry.Enabled {
+		// Load retry queue from persistent storage
+		if err := relay.loadRetryQueue(); err != nil {
+			log.Printf("Warning: Failed to load retry queue: %v", err)
+		}
 		go relay.retryWorker()
 	}
 
 	return relay, nil
+}
+
+// loadRetryQueue loads the retry queue from persistent storage
+func (r *Relay) loadRetryQueue() error {
+	messages, err := r.storage.LoadRetryQueue()
+	if err != nil {
+		return fmt.Errorf("failed to load retry queue: %w", err)
+	}
+
+	if len(messages) > 0 {
+		log.Printf("Loading %d messages from retry queue", len(messages))
+
+		for _, msg := range messages {
+			// Check if message is still valid for retry
+			if msg.Status == "retrying" && msg.RetryAttempt < r.config.Retry.MaxAttempts {
+				// Check if it's time to retry
+				if time.Now().After(msg.NextRetry) {
+					select {
+					case r.retryCh <- msg:
+						log.Printf("Queued message %s for immediate retry", msg.ID)
+					default:
+						log.Printf("Retry queue full, skipping message %s", msg.ID)
+					}
+				} else {
+					// Put it back in queue for later retry
+					select {
+					case r.retryCh <- msg:
+						log.Printf("Queued message %s for retry at %s", msg.ID, msg.NextRetry.Format(time.RFC3339))
+					default:
+						log.Printf("Retry queue full, skipping message %s", msg.ID)
+					}
+				}
+			} else {
+				log.Printf("Skipping message %s (status: %s, attempts: %d)", msg.ID, msg.Status, msg.RetryAttempt)
+			}
+		}
+	}
+
+	return nil
+}
+
+// saveRetryQueue saves the current retry queue to persistent storage
+func (r *Relay) saveRetryQueue() error {
+	// Get all messages currently in the retry queue
+	var queueMessages []*storage.Message
+
+	// We need to collect messages from the channel
+	// Since we can't peek into a channel, we'll get all retrying messages from storage
+	messages, err := r.storage.GetFailedMessages()
+	if err != nil {
+		return fmt.Errorf("failed to get failed messages for queue save: %w", err)
+	}
+
+	// Filter only retrying messages
+	for _, msg := range messages {
+		if msg.Status == "retrying" && msg.RetryAttempt < r.config.Retry.MaxAttempts {
+			queueMessages = append(queueMessages, msg)
+		}
+	}
+
+	// Save to persistent storage
+	if err := r.storage.SaveRetryQueue(queueMessages); err != nil {
+		return fmt.Errorf("failed to save retry queue: %w", err)
+	}
+
+	if len(queueMessages) > 0 {
+		log.Printf("Saved %d messages to retry queue", len(queueMessages))
+	}
+
+	return nil
 }
 
 // Start starts the relay server
@@ -107,8 +181,10 @@ func (r *Relay) waitForRetryQueueEmpty() {
 
 // retryWorker processes failed messages for retry
 func (r *Relay) retryWorker() {
-	ticker := time.NewTicker(30 * time.Second) // Check for retries every 30 seconds
+	ticker := time.NewTicker(30 * time.Second)    // Check for retries every 30 seconds
+	saveTicker := time.NewTicker(5 * time.Minute) // Save queue every 5 minutes
 	defer ticker.Stop()
+	defer saveTicker.Stop()
 
 	for {
 		select {
@@ -116,12 +192,21 @@ func (r *Relay) retryWorker() {
 			log.Println("Retry worker shutting down, processing remaining queue items...")
 			// Process remaining items in queue before shutting down
 			r.processRemainingQueueItems()
+			// Save final state of retry queue
+			if err := r.saveRetryQueue(); err != nil {
+				log.Printf("Error saving retry queue on shutdown: %v", err)
+			}
 			log.Println("Retry worker shutdown complete")
 			return
 		case msg := <-r.retryCh:
 			r.processRetry(msg)
 		case <-ticker.C:
 			r.checkForRetries()
+		case <-saveTicker.C:
+			// Periodically save retry queue
+			if err := r.saveRetryQueue(); err != nil {
+				log.Printf("Error saving retry queue: %v", err)
+			}
 		}
 	}
 }
