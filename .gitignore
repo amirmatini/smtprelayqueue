@@ -69,3 +69,6 @@ release/
 # Temporary files
 tmp/
 temp/ 
+# Application binary
+smtp-relay
+smtp-relay.exe
