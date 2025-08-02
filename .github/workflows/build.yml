@@ -29,15 +29,6 @@ jobs:
           
           # Build for Linux ARM64
           GOOS=linux GOARCH=arm64 go build -ldflags "-s -w" -o dist/smtp-relay-linux-arm64 cmd/smtp-relay/main.go
-          
-          # Build for macOS AMD64
-          GOOS=darwin GOARCH=amd64 go build -ldflags "-s -w" -o dist/smtp-relay-darwin-amd64 cmd/smtp-relay/main.go
-          
-          # Build for macOS ARM64
-          GOOS=darwin GOARCH=arm64 go build -ldflags "-s -w" -o dist/smtp-relay-darwin-arm64 cmd/smtp-relay/main.go
-          
-          # Build for Windows AMD64
-          GOOS=windows GOARCH=amd64 go build -ldflags "-s -w" -o dist/smtp-relay-windows-amd64.exe cmd/smtp-relay/main.go
 
       - name: List built files
         run: ls -la dist/

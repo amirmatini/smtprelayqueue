@@ -48,6 +48,13 @@ sudo cp systemd/smtp-relay.service /etc/systemd/system/
 # Create the service user
 sudo useradd -r -s /bin/false smtp-relay
 
+### Supported Platforms
+
+The SMTP Relay supports the following platforms:
+- **Linux AMD64**: x86_64 architecture
+- **Linux ARM64**: ARM64 architecture (including Raspberry Pi 4)
+
+Pre-built binaries are available for these platforms in the [GitHub releases](https://github.com/amirmatini/smtprelayqueue/releases).
 # Create the application directory
 sudo mkdir -p /opt/smtp-relay
 sudo cp smtp-relay /opt/smtp-relay/
