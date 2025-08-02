@@ -67,10 +67,42 @@ func (r *Relay) Start() error {
 	return r.server.ListenAndServe()
 }
 
-// Stop stops the relay server
+// Stop stops the relay server with graceful shutdown
 func (r *Relay) Stop() error {
+	log.Println("Starting graceful shutdown...")
+
+	// Signal shutdown to all workers
 	close(r.stopCh)
+
+	// Wait for retry worker to finish processing queue
+	if r.config.Retry.Enabled {
+		log.Println("Waiting for retry queue to empty...")
+		r.waitForRetryQueueEmpty()
+	}
+
+	// Close the server
+	log.Println("Closing SMTP server...")
 	return r.server.Close()
+}
+
+// waitForRetryQueueEmpty waits for the retry queue to be processed
+func (r *Relay) waitForRetryQueueEmpty() {
+	timeout := time.After(30 * time.Second) // 30 second timeout
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-timeout:
+			log.Println("Timeout waiting for retry queue to empty")
+			return
+		case <-ticker.C:
+			if len(r.retryCh) == 0 {
+				log.Println("Retry queue emptied successfully")
+				return
+			}
+		}
+	}
 }
 
 // retryWorker processes failed messages for retry
@@ -81,11 +113,31 @@ func (r *Relay) retryWorker() {
 	for {
 		select {
 		case <-r.stopCh:
+			log.Println("Retry worker shutting down, processing remaining queue items...")
+			// Process remaining items in queue before shutting down
+			r.processRemainingQueueItems()
+			log.Println("Retry worker shutdown complete")
 			return
 		case msg := <-r.retryCh:
 			r.processRetry(msg)
 		case <-ticker.C:
 			r.checkForRetries()
+		}
+	}
+}
+
+// processRemainingQueueItems processes all remaining items in the retry queue
+func (r *Relay) processRemainingQueueItems() {
+	processed := 0
+	for {
+		select {
+		case msg := <-r.retryCh:
+			log.Printf("Processing remaining message %s during shutdown", msg.ID)
+			r.processRetry(msg)
+			processed++
+		default:
+			log.Printf("Processed %d remaining messages during shutdown", processed)
+			return
 		}
 	}
 }
