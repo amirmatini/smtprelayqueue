@@ -103,13 +103,6 @@ The application uses a YAML configuration file. See `config.yaml` for a complete
 #### Storage
 - `type`: Storage type (file, memory)
 - `file.path`: Path for file storage
-- `file.max_size`: Maximum storage size
-- `memory.max_messages`: Maximum number of messages in memory
-
-#### Logging
-- `level`: Log level (debug, info, warn, error)
-- `format`: Log format (json, text)
-- `file`: Log file path
 #### Retry Configuration
 - `enabled`: Enable retry mechanism for failed emails
 - `max_attempts`: Maximum number of retry attempts
@@ -117,6 +110,13 @@ The application uses a YAML configuration file. See `config.yaml` for a complete
 - `max_delay`: Maximum delay between retries (e.g., "5m", "1h")
 - `backoff_multiplier`: Multiplier for exponential backoff (e.g., 2.0)
 - `retry_queue_size`: Size of the retry queue
+- `file.max_size`: Maximum storage size
+- `memory.max_messages`: Maximum number of messages in memory
+
+#### Logging
+- `level`: Log level (debug, info, warn, error)
+- `format`: Log format (json, text)
+- `file`: Log file path
 
 #### Rate Limiting
 - `enabled`: Enable rate limiting
@@ -163,13 +163,6 @@ outgoing:
 
 # Storage
 storage:
-  type: "file"
-  file:
-    path: "./messages"
-    max_size: "100MB"
-
-# Logging
-logging:
 # Retry Configuration
 retry:
   enabled: true
@@ -178,6 +171,13 @@ retry:
   max_delay: "5m"
   backoff_multiplier: 2.0
   retry_queue_size: 100
+  type: "file"
+  file:
+    path: "./messages"
+    max_size: "100MB"
+
+# Logging
+logging:
   level: "info"
   format: "text"
   file: "./logs/smtp-relay.log"
@@ -198,13 +198,6 @@ The SMTP relay is designed to provide fast response times by processing messages
    - Updates message status to "forwarding"
    - Attempts to send to the target SMTP server
    - Handles timeouts (30-second limit)
-   - Updates final status (forwarded/failed)
-
-### Benefits
-
-- **Fast Client Response**: No waiting for slow target servers
-- **No Timeouts**: Clients don't experience connection timeouts
-- **Concurrent Processing**: Multiple emails can be processed simultaneously
 ## Retry Mechanism
 
 The SMTP relay includes a configurable retry mechanism for failed emails:
@@ -232,6 +225,13 @@ received → forwarding → [SUCCESS] → forwarded
                 ↓
             [RETRY FAILURE] → retrying → ... → failed (after max attempts)
 ```
+   - Updates final status (forwarded/failed)
+
+### Benefits
+
+- **Fast Client Response**: No waiting for slow target servers
+- **No Timeouts**: Clients don't experience connection timeouts
+- **Concurrent Processing**: Multiple emails can be processed simultaneously
 - **Reliable**: Failed forwarding doesn't affect client experience
 - **Observable**: All status changes are logged and stored
 
