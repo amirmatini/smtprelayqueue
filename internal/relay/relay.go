@@ -10,7 +10,6 @@ import (
 	"log"
 	"net/smtp"
 	"strings"
-	"sync"
 	"time"
 
 	"smtp-relay/internal/config"
@@ -26,12 +25,11 @@ type Relay struct {
 	config  *config.Config
 	storage storage.Storage
 	server  *gosmtp.Server
-	mu      sync.RWMutex
 	stopCh  chan struct{}
 	retryCh chan *storage.Message
 	// Health monitoring
 	activeConnections int32
-	lastActivity      time.Time
+	lastActivity      int64 // Use atomic int64 for thread safety
 	healthTicker      *time.Ticker
 }
 
@@ -81,7 +79,7 @@ func New(cfg *config.Config, store storage.Storage) (*Relay, error) {
 	relay.server = server
 
 	// Start health monitoring
-	relay.lastActivity = time.Now()
+	atomic.StoreInt64(&relay.lastActivity, time.Now().Unix())
 	relay.healthTicker = time.NewTicker(30 * time.Second)
 	go relay.healthMonitor()
 
@@ -115,27 +113,49 @@ func (r *Relay) healthMonitor() {
 // checkHealth performs health checks and logs status
 func (r *Relay) checkHealth() {
 	active := atomic.LoadInt32(&r.activeConnections)
-	lastActivity := r.lastActivity
+	lastActivity := atomic.LoadInt64(&r.lastActivity)
 
 	// Log health status every 5 minutes
-	if time.Since(lastActivity) > 5*time.Minute {
+	if time.Since(time.Unix(lastActivity, 0)) > 5*time.Minute {
 		log.Printf("Health check: Active connections: %d, Last activity: %v ago",
-			active, time.Since(lastActivity))
+			active, time.Since(time.Unix(lastActivity, 0)))
 	}
 
 	// Update last activity if there are active connections
 	if active > 0 {
-		r.lastActivity = time.Now()
+		atomic.StoreInt64(&r.lastActivity, time.Now().Unix())
 	}
 
 	// Log warning if too many connections
 	if active > 50 {
 		log.Printf("Warning: High number of active connections: %d", active)
 	}
+
+	// Deadlock detection: if no activity for too long with active connections
+	if active > 0 && time.Since(time.Unix(lastActivity, 0)) > 10*time.Minute {
+		log.Printf("WARNING: Potential deadlock detected! %d active connections but no activity for %v",
+			active, time.Since(time.Unix(lastActivity, 0)))
+	}
 }
 
 // loadRetryQueue loads the retry queue from persistent storage
 func (r *Relay) loadRetryQueue() error {
+	// Add timeout to prevent hanging
+	done := make(chan error, 1)
+	go func() {
+		done <- r.performLoadRetryQueue()
+	}()
+
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(30 * time.Second):
+		return fmt.Errorf("timeout loading retry queue after 30 seconds")
+	}
+}
+
+// performLoadRetryQueue performs the actual load operation
+func (r *Relay) performLoadRetryQueue() error {
 	messages, err := r.storage.LoadRetryQueue()
 	if err != nil {
 		return fmt.Errorf("failed to load retry queue: %w", err)
@@ -175,6 +195,22 @@ func (r *Relay) loadRetryQueue() error {
 
 // saveRetryQueue saves the current retry queue to persistent storage
 func (r *Relay) saveRetryQueue() error {
+	// Add timeout to prevent hanging
+	done := make(chan error, 1)
+	go func() {
+		done <- r.performSaveRetryQueue()
+	}()
+
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(30 * time.Second):
+		return fmt.Errorf("timeout saving retry queue after 30 seconds")
+	}
+}
+
+// performSaveRetryQueue performs the actual save operation
+func (r *Relay) performSaveRetryQueue() error {
 	// Get all messages currently in the retry queue
 	var queueMessages []*storage.Message
 
@@ -210,6 +246,22 @@ func (r *Relay) cleanupOldFailedMessages() error {
 		return nil // Cleanup disabled
 	}
 
+	// Add timeout to prevent hanging
+	done := make(chan error, 1)
+	go func() {
+		done <- r.performCleanupOldFailedMessages()
+	}()
+
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(60 * time.Second):
+		return fmt.Errorf("timeout cleaning up old failed messages after 60 seconds")
+	}
+}
+
+// performCleanupOldFailedMessages performs the actual cleanup operation
+func (r *Relay) performCleanupOldFailedMessages() error {
 	cutoffTime := time.Now().Add(-r.config.Retry.CleanupFailedAfter)
 
 	// Get all failed messages
