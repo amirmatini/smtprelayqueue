@@ -97,20 +97,33 @@ func NewMemoryStorage(cfg config.MemConfig) (*MemoryStorage, error) {
 
 // FileStorage methods
 func (fs *FileStorage) Store(msg *Message) error {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
+	// Use a timeout to prevent hanging
+	done := make(chan error, 1)
+	go func() {
+		fs.mu.Lock()
+		defer fs.mu.Unlock()
 
-	filename := filepath.Join(fs.path, msg.ID+".json")
-	data, err := json.MarshalIndent(msg, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal message: %w", err)
+		filename := filepath.Join(fs.path, msg.ID+".json")
+		data, err := json.MarshalIndent(msg, "", "  ")
+		if err != nil {
+			done <- fmt.Errorf("failed to marshal message: %w", err)
+			return
+		}
+
+		if err := os.WriteFile(filename, data, 0644); err != nil {
+			done <- fmt.Errorf("failed to write message file: %w", err)
+			return
+		}
+
+		done <- nil
+	}()
+
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(10 * time.Second):
+		return fmt.Errorf("timeout storing message after 10 seconds")
 	}
-
-	if err := os.WriteFile(filename, data, 0644); err != nil {
-		return fmt.Errorf("failed to write message file: %w", err)
-	}
-
-	return nil
 }
 
 func (fs *FileStorage) Get(id string) (*Message, error) {
@@ -143,6 +156,13 @@ func (fs *FileStorage) List(limit int) ([]*Message, error) {
 	var messages []*Message
 	count := 0
 
+	// Collect all file data while holding the lock
+	type fileData struct {
+		id   string
+		data []byte
+	}
+	var fileDataList []fileData
+
 	for _, file := range files {
 		if count >= limit && limit > 0 {
 			break
@@ -150,10 +170,19 @@ func (fs *FileStorage) List(limit int) ([]*Message, error) {
 
 		if filepath.Ext(file.Name()) == ".json" {
 			id := file.Name()[:len(file.Name())-5] // Remove .json extension
-			if msg, err := fs.Get(id); err == nil {
-				messages = append(messages, msg)
+			filename := filepath.Join(fs.path, id+".json")
+			if data, err := os.ReadFile(filename); err == nil {
+				fileDataList = append(fileDataList, fileData{id: id, data: data})
 				count++
 			}
+		}
+	}
+
+	// Process the data outside of the lock to avoid nested lock acquisition
+	for _, fd := range fileDataList {
+		var msg Message
+		if err := json.Unmarshal(fd.data, &msg); err == nil {
+			messages = append(messages, &msg)
 		}
 	}
 
@@ -161,7 +190,18 @@ func (fs *FileStorage) List(limit int) ([]*Message, error) {
 }
 
 func (fs *FileStorage) Update(id string, msg *Message) error {
-	return fs.Store(msg)
+	// Use a timeout to prevent hanging
+	done := make(chan error, 1)
+	go func() {
+		done <- fs.Store(msg)
+	}()
+
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(10 * time.Second):
+		return fmt.Errorf("timeout updating message after 10 seconds")
+	}
 }
 
 func (fs *FileStorage) Delete(id string) error {
@@ -185,15 +225,30 @@ func (fs *FileStorage) GetFailedMessages() ([]*Message, error) {
 		return nil, fmt.Errorf("failed to read storage directory: %w", err)
 	}
 
-	var failedMessages []*Message
+	// Collect all file data while holding the lock
+	type fileData struct {
+		id   string
+		data []byte
+	}
+	var fileDataList []fileData
 
 	for _, file := range files {
 		if filepath.Ext(file.Name()) == ".json" {
 			id := file.Name()[:len(file.Name())-5] // Remove .json extension
-			if msg, err := fs.Get(id); err == nil {
-				if msg.Status == "failed" || msg.Status == "retrying" {
-					failedMessages = append(failedMessages, msg)
-				}
+			filename := filepath.Join(fs.path, id+".json")
+			if data, err := os.ReadFile(filename); err == nil {
+				fileDataList = append(fileDataList, fileData{id: id, data: data})
+			}
+		}
+	}
+
+	// Process the data outside of the lock to avoid nested lock acquisition
+	var failedMessages []*Message
+	for _, fd := range fileDataList {
+		var msg Message
+		if err := json.Unmarshal(fd.data, &msg); err == nil {
+			if msg.Status == "failed" || msg.Status == "retrying" {
+				failedMessages = append(failedMessages, &msg)
 			}
 		}
 	}

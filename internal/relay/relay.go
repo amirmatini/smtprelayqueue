@@ -334,10 +334,18 @@ func (r *Relay) waitForRetryQueueEmpty() {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
+	// First, try to process any remaining items quickly
+	r.processRemainingQueueItems()
+
 	for {
 		select {
 		case <-timeout:
-			log.Println("Timeout waiting for retry queue to empty")
+			remaining := len(r.retryCh)
+			if remaining > 0 {
+				log.Printf("Timeout waiting for retry queue to empty, %d items remaining", remaining)
+			} else {
+				log.Println("Retry queue emptied successfully")
+			}
 			return
 		case <-ticker.C:
 			if len(r.retryCh) == 0 {
@@ -432,6 +440,9 @@ func (r *Relay) processRetry(msg *storage.Message) {
 	if !r.config.Retry.Enabled {
 		return
 	}
+
+	// Update activity timestamp to prevent false deadlock detection
+	atomic.StoreInt64(&r.lastActivity, time.Now().Unix())
 
 	// Check if we should retry forever or respect max attempts
 	maxAttempts := r.config.Retry.MaxAttempts
@@ -788,6 +799,9 @@ func (s *Session) forwardMessage(msg *storage.Message) {
 	msg.Status = "forwarding"
 	if err := s.backend.storage.Update(msg.ID, msg); err != nil {
 		log.Printf("Failed to update message status to forwarding: %v", err)
+	} else {
+		// Update activity timestamp to prevent false deadlock detection
+		atomic.StoreInt64(&s.backend.relay.lastActivity, time.Now().Unix())
 	}
 
 	log.Printf("Starting to forward message %s to %s:%d", msg.ID, s.backend.config.Outgoing.Host, s.backend.config.Outgoing.Port)
