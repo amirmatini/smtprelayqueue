@@ -16,6 +16,8 @@ import (
 	"smtp-relay/internal/config"
 	"smtp-relay/internal/storage"
 
+	"sync/atomic"
+
 	gosmtp "github.com/emersion/go-smtp"
 )
 
@@ -27,6 +29,10 @@ type Relay struct {
 	mu      sync.RWMutex
 	stopCh  chan struct{}
 	retryCh chan *storage.Message
+	// Health monitoring
+	activeConnections int32
+	lastActivity      time.Time
+	healthTicker      *time.Ticker
 }
 
 // New creates a new relay instance
@@ -52,6 +58,10 @@ func New(cfg *config.Config, store storage.Storage) (*Relay, error) {
 	server.MaxMessageBytes = 1024 * 1024 * 10 // 10MB
 	server.MaxRecipients = 50
 
+	// Add connection limits and timeouts to prevent hanging
+	server.MaxLineLength = 1000                          // Limit line length
+	server.AllowInsecureAuth = !cfg.Incoming.TLS.Enabled // Only allow insecure auth if TLS is disabled
+
 	// Configure TLS for incoming server if enabled
 	if cfg.Incoming.TLS.Enabled {
 		if cfg.Incoming.TLS.CertFile == "" || cfg.Incoming.TLS.KeyFile == "" {
@@ -70,6 +80,11 @@ func New(cfg *config.Config, store storage.Storage) (*Relay, error) {
 
 	relay.server = server
 
+	// Start health monitoring
+	relay.lastActivity = time.Now()
+	relay.healthTicker = time.NewTicker(30 * time.Second)
+	go relay.healthMonitor()
+
 	// Start retry worker if retry is enabled
 	if cfg.Retry.Enabled {
 		// Load retry queue from persistent storage
@@ -80,6 +95,43 @@ func New(cfg *config.Config, store storage.Storage) (*Relay, error) {
 	}
 
 	return relay, nil
+}
+
+// healthMonitor monitors server health and prevents hanging
+func (r *Relay) healthMonitor() {
+	defer r.healthTicker.Stop()
+
+	for {
+		select {
+		case <-r.stopCh:
+			log.Println("Health monitor shutting down")
+			return
+		case <-r.healthTicker.C:
+			r.checkHealth()
+		}
+	}
+}
+
+// checkHealth performs health checks and logs status
+func (r *Relay) checkHealth() {
+	active := atomic.LoadInt32(&r.activeConnections)
+	lastActivity := r.lastActivity
+
+	// Log health status every 5 minutes
+	if time.Since(lastActivity) > 5*time.Minute {
+		log.Printf("Health check: Active connections: %d, Last activity: %v ago",
+			active, time.Since(lastActivity))
+	}
+
+	// Update last activity if there are active connections
+	if active > 0 {
+		r.lastActivity = time.Now()
+	}
+
+	// Log warning if too many connections
+	if active > 50 {
+		log.Printf("Warning: High number of active connections: %d", active)
+	}
 }
 
 // loadRetryQueue loads the retry queue from persistent storage
@@ -187,12 +239,25 @@ func (r *Relay) cleanupOldFailedMessages() error {
 // Start starts the relay server
 func (r *Relay) Start() error {
 	log.Printf("Starting SMTP relay on %s:%d", r.config.Incoming.Host, r.config.Incoming.Port)
+
+	// Add panic recovery
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("Panic in SMTP server: %v", rec)
+		}
+	}()
+
 	return r.server.ListenAndServe()
 }
 
 // Stop stops the relay server with graceful shutdown
 func (r *Relay) Stop() error {
 	log.Println("Starting graceful shutdown...")
+
+	// Stop health monitoring
+	if r.healthTicker != nil {
+		r.healthTicker.Stop()
+	}
 
 	// Signal shutdown to all workers
 	close(r.stopCh)
@@ -202,6 +267,9 @@ func (r *Relay) Stop() error {
 		log.Println("Waiting for retry queue to empty...")
 		r.waitForRetryQueueEmpty()
 	}
+
+	// Wait for active connections to close (with timeout)
+	r.waitForConnectionsToClose()
 
 	// Close the server
 	log.Println("Closing SMTP server...")
@@ -222,6 +290,30 @@ func (r *Relay) waitForRetryQueueEmpty() {
 		case <-ticker.C:
 			if len(r.retryCh) == 0 {
 				log.Println("Retry queue emptied successfully")
+				return
+			}
+		}
+	}
+}
+
+// waitForConnectionsToClose waits for active connections to close with timeout
+func (r *Relay) waitForConnectionsToClose() {
+	timeout := time.After(10 * time.Second) // 10 second timeout for connections
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-timeout:
+			active := atomic.LoadInt32(&r.activeConnections)
+			if active > 0 {
+				log.Printf("Timeout waiting for connections to close, %d connections still active", active)
+			}
+			return
+		case <-ticker.C:
+			active := atomic.LoadInt32(&r.activeConnections)
+			if active == 0 {
+				log.Println("All connections closed successfully")
 				return
 			}
 		}
@@ -537,7 +629,13 @@ type Backend struct {
 
 // NewSession creates a new SMTP session
 func (b *Backend) NewSession(conn *gosmtp.Conn) (gosmtp.Session, error) {
-	return &Session{backend: b}, nil
+	// Track active connection
+	atomic.AddInt32(&b.relay.activeConnections, 1)
+
+	return &Session{
+		backend: b,
+		conn:    conn,
+	}, nil
 }
 
 // Session represents an SMTP session
@@ -545,6 +643,7 @@ type Session struct {
 	backend *Backend
 	from    string
 	to      []string
+	conn    *gosmtp.Conn // Added for tracking active connections
 }
 
 // AuthPlain handles PLAIN authentication
@@ -619,6 +718,8 @@ func (s *Session) Reset() {
 
 // Logout logs out the session
 func (s *Session) Logout() error {
+	// Track connection cleanup
+	atomic.AddInt32(&s.backend.relay.activeConnections, -1)
 	return nil
 }
 

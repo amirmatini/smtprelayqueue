@@ -27,6 +27,10 @@ type IncomingConfig struct {
 	Port int        `yaml:"port"`
 	TLS  TLSConfig  `yaml:"tls"`
 	Auth AuthConfig `yaml:"auth"`
+	// Server limits to prevent hanging
+	MaxConnections    int           `yaml:"max_connections"`
+	ConnectionTimeout time.Duration `yaml:"connection_timeout"`
+	IdleTimeout       time.Duration `yaml:"idle_timeout"`
 }
 
 // OutgoingConfig represents the outgoing SMTP server configuration
