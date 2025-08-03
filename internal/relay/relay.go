@@ -4,6 +4,7 @@
 package relay
 
 import (
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
@@ -50,6 +51,22 @@ func New(cfg *config.Config, store storage.Storage) (*Relay, error) {
 	server.WriteTimeout = 10 * time.Second
 	server.MaxMessageBytes = 1024 * 1024 * 10 // 10MB
 	server.MaxRecipients = 50
+
+	// Configure TLS for incoming server if enabled
+	if cfg.Incoming.TLS.Enabled {
+		if cfg.Incoming.TLS.CertFile == "" || cfg.Incoming.TLS.KeyFile == "" {
+			return nil, fmt.Errorf("TLS enabled but cert_file and key_file are required")
+		}
+
+		cert, err := tls.LoadX509KeyPair(cfg.Incoming.TLS.CertFile, cfg.Incoming.TLS.KeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load TLS certificate: %w", err)
+		}
+
+		server.TLSConfig = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+		}
+	}
 
 	relay.server = server
 
@@ -391,10 +408,10 @@ func (r *Relay) attemptForward(msg *storage.Message) bool {
 		}
 	}
 
-	// Send email using net/smtp with timeout
+	// Send email using proper TLS handling
 	done := make(chan error, 1)
 	go func() {
-		done <- smtp.SendMail(addr, auth, msg.From, msg.To, msg.Body)
+		done <- r.sendMailWithTLS(addr, auth, msg.From, msg.To, msg.Body)
 	}()
 
 	// Wait for completion with timeout
@@ -415,6 +432,100 @@ func (r *Relay) attemptForward(msg *storage.Message) bool {
 	msg.Error = ""
 	r.storage.Update(msg.ID, msg)
 	return true
+}
+
+// sendMailWithTLS sends an email with proper TLS handling based on configuration
+func (r *Relay) sendMailWithTLS(addr string, auth smtp.Auth, from string, to []string, msg []byte) error {
+	var conn *smtp.Client
+	var err error
+
+	// Create TLS config if needed
+	var tlsConfig *tls.Config
+	if r.config.Outgoing.TLS.Enabled {
+		tlsConfig = &tls.Config{
+			ServerName:         r.config.Outgoing.Host,
+			InsecureSkipVerify: r.config.Outgoing.TLS.SkipVerify,
+		}
+	}
+
+	// Connect based on TLS mode
+	switch r.config.Outgoing.TLS.Mode {
+	case "ssl":
+		// SSL/TLS connection (port 465)
+		if !r.config.Outgoing.TLS.Enabled {
+			return fmt.Errorf("TLS must be enabled for SSL mode")
+		}
+		// For SSL mode, we need to establish a TLS connection first
+		tlsConn, err := tls.Dial("tcp", addr, tlsConfig)
+		if err != nil {
+			return fmt.Errorf("failed to establish TLS connection to %s: %w", addr, err)
+		}
+		conn, err = smtp.NewClient(tlsConn, r.config.Outgoing.Host)
+		if err != nil {
+			tlsConn.Close()
+			return fmt.Errorf("failed to create SMTP client: %w", err)
+		}
+
+	case "starttls":
+		// STARTTLS connection (port 587)
+		conn, err = smtp.Dial(addr)
+		if err != nil {
+			return fmt.Errorf("failed to connect to %s: %w", addr, err)
+		}
+		if r.config.Outgoing.TLS.Enabled {
+			if err = conn.StartTLS(tlsConfig); err != nil {
+				conn.Close()
+				return fmt.Errorf("failed to start TLS: %w", err)
+			}
+		}
+
+	case "none":
+		// Plain connection (port 25)
+		conn, err = smtp.Dial(addr)
+		if err != nil {
+			return fmt.Errorf("failed to connect to %s: %w", addr, err)
+		}
+
+	default:
+		return fmt.Errorf("unsupported TLS mode: %s", r.config.Outgoing.TLS.Mode)
+	}
+
+	defer conn.Close()
+
+	// Authenticate if required
+	if auth != nil {
+		if err := conn.Auth(auth); err != nil {
+			return fmt.Errorf("authentication failed: %w", err)
+		}
+	}
+
+	// Send the email
+	if err := conn.Mail(from); err != nil {
+		return fmt.Errorf("failed to set sender: %w", err)
+	}
+
+	for _, recipient := range to {
+		if err := conn.Rcpt(recipient); err != nil {
+			return fmt.Errorf("failed to set recipient %s: %w", recipient, err)
+		}
+	}
+
+	w, err := conn.Data()
+	if err != nil {
+		return fmt.Errorf("failed to start data transfer: %w", err)
+	}
+
+	_, err = w.Write(msg)
+	if err != nil {
+		return fmt.Errorf("failed to write message: %w", err)
+	}
+
+	err = w.Close()
+	if err != nil {
+		return fmt.Errorf("failed to close data transfer: %w", err)
+	}
+
+	return nil
 }
 
 // Backend implements the SMTP backend
