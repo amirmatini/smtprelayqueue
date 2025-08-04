@@ -60,10 +60,8 @@ detect_system() {
         else
             OS="linux"
         fi
-    elif [[ "$OSTYPE" == "darwin"* ]]; then
-        OS="darwin"
     else
-        print_error "Unsupported operating system: $OSTYPE"
+        print_error "Unsupported operating system: $OSTYPE. This installer only supports Linux."
         exit 1
     fi
     
@@ -100,13 +98,16 @@ install_dependencies() {
         redhat)
             yum install -y curl wget systemd
             ;;
-        darwin)
-            # Check if Homebrew is installed
-            if ! command -v brew &> /dev/null; then
-                print_warning "Homebrew not found. Please install it first: https://brew.sh"
-                exit 1
+        *)
+            # Generic Linux
+            if command -v apt-get &> /dev/null; then
+                apt-get update
+                apt-get install -y curl wget systemd-sysv
+            elif command -v yum &> /dev/null; then
+                yum install -y curl wget systemd
+            else
+                print_warning "Could not install dependencies automatically. Please ensure curl and wget are installed."
             fi
-            brew install curl wget
             ;;
     esac
     
@@ -116,11 +117,6 @@ install_dependencies() {
 # Function to create service user
 create_service_user() {
     print_status "Creating service user..."
-    
-    if [[ $OS == "darwin" ]]; then
-        # macOS doesn't use systemd, skip user creation
-        return
-    fi
     
     if ! id "$SERVICE_USER" &>/dev/null; then
         useradd -r -s /bin/false -d "$INSTALL_DIR" "$SERVICE_USER"
@@ -238,20 +234,13 @@ create_directories() {
     mkdir -p "$INSTALL_DIR/logs"
     mkdir -p "$INSTALL_DIR/systemd"
     
-    if [[ $OS != "darwin" ]]; then
-        chown -R "$SERVICE_USER:$SERVICE_GROUP" "$INSTALL_DIR"
-    fi
+    chown -R "$SERVICE_USER:$SERVICE_GROUP" "$INSTALL_DIR"
     
     print_success "Directories created"
 }
 
 # Function to create systemd service
 create_systemd_service() {
-    if [[ $OS == "darwin" ]]; then
-        print_warning "Skipping systemd service creation (macOS detected)"
-        return
-    fi
-    
     print_status "Creating systemd service..."
     
     cat > "$INSTALL_DIR/systemd/$SERVICE_NAME.service" << EOF
@@ -292,46 +281,6 @@ EOF
     print_success "Systemd service created and enabled"
 }
 
-# Function to create launchd service (macOS)
-create_launchd_service() {
-    if [[ $OS != "darwin" ]]; then
-        return
-    fi
-    
-    print_status "Creating launchd service..."
-    
-    cat > "$INSTALL_DIR/$SERVICE_NAME.plist" << EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.smtp-relay.$SERVICE_NAME</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>$INSTALL_DIR/$BINARY_NAME</string>
-    </array>
-    <key>WorkingDirectory</key>
-    <string>$INSTALL_DIR</string>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>$INSTALL_DIR/logs/smtp-relay.log</string>
-    <key>StandardErrorPath</key>
-    <string>$INSTALL_DIR/logs/smtp-relay.log</string>
-</dict>
-</plist>
-EOF
-
-    # Copy to LaunchAgents directory
-    cp "$INSTALL_DIR/$SERVICE_NAME.plist" "$HOME/Library/LaunchAgents/"
-    
-    print_success "Launchd service created"
-    print_warning "To start the service, run: launchctl load ~/Library/LaunchAgents/$SERVICE_NAME.plist"
-}
-
 # Function to create startup script
 create_startup_script() {
     print_status "Creating startup script..."
@@ -357,23 +306,16 @@ set -e
 echo "Uninstalling SMTP Relay..."
 
 # Stop and disable service
-if [[ "$OSTYPE" == "darwin"* ]]; then
-    launchctl unload ~/Library/LaunchAgents/$SERVICE_NAME.plist 2>/dev/null || true
-    rm -f ~/Library/LaunchAgents/$SERVICE_NAME.plist
-else
-    systemctl stop $SERVICE_NAME 2>/dev/null || true
-    systemctl disable $SERVICE_NAME 2>/dev/null || true
-    rm -f /etc/systemd/system/$SERVICE_NAME.service
-    systemctl daemon-reload
-fi
+systemctl stop $SERVICE_NAME 2>/dev/null || true
+systemctl disable $SERVICE_NAME 2>/dev/null || true
+rm -f /etc/systemd/system/$SERVICE_NAME.service
+systemctl daemon-reload
 
 # Remove installation directory
 rm -rf $INSTALL_DIR
 
-# Remove service user (Linux only)
-if [[ "$OSTYPE" != "darwin"* ]]; then
-    userdel $SERVICE_USER 2>/dev/null || true
-fi
+# Remove service user
+userdel $SERVICE_USER 2>/dev/null || true
 
 echo "SMTP Relay uninstalled successfully"
 EOF
@@ -397,15 +339,8 @@ show_post_install_instructions() {
     echo "Next steps:"
     echo "1. Edit the configuration file with your SMTP provider settings"
     echo "2. Start the service:"
-    
-    if [[ $OS == "darwin" ]]; then
-        echo "   launchctl load ~/Library/LaunchAgents/$SERVICE_NAME.plist"
-        echo "   # Or run manually: $INSTALL_DIR/start.sh"
-    else
-        echo "   systemctl start $SERVICE_NAME"
-        echo "   systemctl status $SERVICE_NAME"
-    fi
-    
+    echo "   systemctl start $SERVICE_NAME"
+    echo "   systemctl status $SERVICE_NAME"
     echo
     echo "To uninstall: $INSTALL_DIR/uninstall.sh"
     echo
@@ -427,7 +362,6 @@ main() {
     create_config
     create_directories
     create_systemd_service
-    create_launchd_service
     create_startup_script
     create_uninstall_script
     show_post_install_instructions

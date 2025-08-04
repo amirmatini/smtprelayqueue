@@ -36,7 +36,6 @@ This will:
 
 **Supported Platforms:**
 - Linux (AMD64, ARM64, ARMv7)
-- macOS (Intel, Apple Silicon)
 
 ### Manual Installation
 
@@ -91,8 +90,6 @@ The SMTP Relay supports the following platforms:
 - **Linux AMD64**: x86_64 architecture
 - **Linux ARM64**: ARM64 architecture (including Raspberry Pi 4)
 - **Linux ARMv7**: ARMv7 architecture
-- **macOS Intel**: x86_64 architecture
-- **macOS Apple Silicon**: ARM64 architecture
 
 Pre-built binaries are available for these platforms in the [GitHub releases](https://github.com/amirmatini/smtprelayqueue/releases).
 
