@@ -74,9 +74,6 @@ detect_system() {
         aarch64|arm64)
             ARCH="arm64"
             ;;
-        armv7l)
-            ARCH="armv7"
-            ;;
         *)
             print_error "Unsupported architecture: $ARCH"
             exit 1

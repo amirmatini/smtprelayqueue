@@ -19,10 +19,6 @@ jobs:
             goos: linux
             goarch: arm64
             artifact_name: smtp-relay-linux-arm64
-          - os: ubuntu-latest
-            goos: linux
-            goarch: armv7
-            artifact_name: smtp-relay-linux-armv7
 
     steps:
     - name: Checkout code
@@ -78,7 +74,6 @@ jobs:
         files: |
           smtp-relay-linux-amd64
           smtp-relay-linux-arm64
-          smtp-relay-linux-armv7
         draft: false
         prerelease: false
         generate_release_notes: true

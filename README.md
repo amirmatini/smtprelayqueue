@@ -35,7 +35,7 @@ This will:
 - ✅ Enable the service to start on boot
 
 **Supported Platforms:**
-- Linux (AMD64, ARM64, ARMv7)
+- Linux (AMD64, ARM64)
 
 ### Manual Installation
 
@@ -89,7 +89,6 @@ sudo systemctl start smtp-relay
 The SMTP Relay supports the following platforms:
 - **Linux AMD64**: x86_64 architecture
 - **Linux ARM64**: ARM64 architecture (including Raspberry Pi 4)
-- **Linux ARMv7**: ARMv7 architecture
 
 Pre-built binaries are available for these platforms in the [GitHub releases](https://github.com/amirmatini/smtprelayqueue/releases).
 
