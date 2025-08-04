@@ -15,18 +15,40 @@ A Go-based SMTP relay server that receives emails, stores them with all headers 
 - **Rate Limiting**: Built-in rate limiting support
 - **Retry Mechanism**: Configurable retry logic for failed emails with exponential backoff
 - **Robust Error Handling**: Comprehensive error handling with panic recovery
+- **Deadlock Prevention**: Advanced deadlock detection and prevention mechanisms
 
 ## Installation
 
-### Prerequisites
+### 🚀 One-Command Installation (Recommended)
+
+Install SMTP Relay with a single command:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/amirmatini/smtprelayqueue/main/install.sh | sudo bash
+```
+
+This will:
+- ✅ Download the latest binary for your platform
+- ✅ Create a systemd service (Linux) or launchd service (macOS)
+- ✅ Set up configuration files
+- ✅ Create necessary directories and permissions
+- ✅ Enable the service to start on boot
+
+**Supported Platforms:**
+- Linux (AMD64, ARM64, ARMv7)
+- macOS (Intel, Apple Silicon)
+
+### Manual Installation
+
+#### Prerequisites
 
 - Go 1.21 or later (for building from source)
 
-### Quick Installation
+#### Quick Installation
 
 Download the latest binary for your platform from the [GitHub releases](https://github.com/amirmatini/smtprelayqueue/releases) page.
 
-### Building from Source
+#### Building from Source
 
 ```bash
 # Clone the repository
@@ -37,7 +59,7 @@ cd smtprelayqueue
 go build -o smtp-relay cmd/smtp-relay/main.go
 ```
 
-### Systemd Service
+#### Systemd Service
 
 For Linux deployment, you can use the provided systemd service file:
 
@@ -48,13 +70,6 @@ sudo cp systemd/smtp-relay.service /etc/systemd/system/
 # Create the service user
 sudo useradd -r -s /bin/false smtp-relay
 
-### Supported Platforms
-
-The SMTP Relay supports the following platforms:
-- **Linux AMD64**: x86_64 architecture
-- **Linux ARM64**: ARM64 architecture (including Raspberry Pi 4)
-
-Pre-built binaries are available for these platforms in the [GitHub releases](https://github.com/amirmatini/smtprelayqueue/releases).
 # Create the application directory
 sudo mkdir -p /opt/smtp-relay
 sudo cp smtp-relay /opt/smtp-relay/
@@ -70,7 +85,16 @@ sudo systemctl enable smtp-relay
 sudo systemctl start smtp-relay
 ```
 
+### Supported Platforms
 
+The SMTP Relay supports the following platforms:
+- **Linux AMD64**: x86_64 architecture
+- **Linux ARM64**: ARM64 architecture (including Raspberry Pi 4)
+- **Linux ARMv7**: ARMv7 architecture
+- **macOS Intel**: x86_64 architecture
+- **macOS Apple Silicon**: ARM64 architecture
+
+Pre-built binaries are available for these platforms in the [GitHub releases](https://github.com/amirmatini/smtprelayqueue/releases).
 
 ## Configuration
 
