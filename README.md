@@ -27,13 +27,6 @@ Install SMTP Relay with a single command:
 curl -sSL https://raw.githubusercontent.com/amirmatini/smtprelayqueue/main/install.sh | sudo bash
 ```
 
-This will:
-- ✅ Download the latest binary for your platform
-- ✅ Create a systemd service (Linux) or launchd service (macOS)
-- ✅ Set up configuration files
-- ✅ Create necessary directories and permissions
-- ✅ Enable the service to start on boot
-
 **Supported Platforms:**
 - Linux (AMD64, ARM64)
 
@@ -60,7 +53,7 @@ go build -o smtp-relay cmd/smtp-relay/main.go
 
 #### Systemd Service
 
-For Linux deployment, you can use the provided systemd service file:
+For Linux deployment, you can use the provided systemd service file located at `systemd/smtp-relay.service`. The installer automatically sets up the systemd service, but if you're doing a manual installation, you can copy the service file:
 
 ```bash
 # Copy the service file
