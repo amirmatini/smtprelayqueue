@@ -1,7 +1,6 @@
 #!/bin/bash
 
 # SMTP Relay Installer Script
-# Version: 1.8.1
 # Usage: curl -sSL https://raw.githubusercontent.com/amirmatini/smtprelayqueue/main/install.sh | bash
 
 set -e
@@ -15,7 +14,6 @@ NC='\033[0m' # No Color
 
 # Configuration
 REPO_URL="https://github.com/amirmatini/smtprelayqueue"
-RELEASE_VERSION="v1.8.1"
 INSTALL_DIR="/opt/smtp-relay"
 SERVICE_USER="smtp-relay"
 SERVICE_GROUP="smtp-relay"
@@ -37,6 +35,38 @@ print_warning() {
 
 print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
+}
+
+# Function to get latest version from GitHub releases
+get_latest_version() {
+    print_status "Fetching latest version from GitHub releases..."
+    
+    # Try to get the latest version using GitHub API
+    if command -v curl &> /dev/null; then
+        LATEST_VERSION=$(curl -s https://api.github.com/repos/amirmatini/smtprelayqueue/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+        
+        if [[ -n "$LATEST_VERSION" && "$LATEST_VERSION" != "null" ]]; then
+            print_success "Latest version: $LATEST_VERSION"
+            echo "$LATEST_VERSION"
+            return 0
+        fi
+    fi
+    
+    # Fallback: try to get from releases page
+    if command -v curl &> /dev/null; then
+        LATEST_VERSION=$(curl -s https://github.com/amirmatini/smtprelayqueue/releases | grep -o 'v[0-9]\+\.[0-9]\+\.[0-9]\+' | head -1)
+        
+        if [[ -n "$LATEST_VERSION" ]]; then
+            print_success "Latest version: $LATEST_VERSION"
+            echo "$LATEST_VERSION"
+            return 0
+        fi
+    fi
+    
+    # Final fallback: use a default version
+    print_warning "Could not fetch latest version, using default: v1.8.1"
+    echo "v1.8.1"
+    return 1
 }
 
 # Function to check if running as root
@@ -125,6 +155,8 @@ create_service_user() {
 
 # Function to download and install binary
 install_binary() {
+    local RELEASE_VERSION="$1"
+    
     print_status "Downloading SMTP Relay binary..."
     
     # Create installation directory
@@ -323,8 +355,10 @@ EOF
 
 # Function to display post-installation instructions
 show_post_install_instructions() {
+    local RELEASE_VERSION="$1"
+    
     echo
-    print_success "SMTP Relay v$RELEASE_VERSION installed successfully!"
+    print_success "SMTP Relay $RELEASE_VERSION installed successfully!"
     echo
     echo "Installation directory: $INSTALL_DIR"
     echo "Configuration file: $INSTALL_DIR/config.yaml"
@@ -347,21 +381,25 @@ show_post_install_instructions() {
 # Main installation function
 main() {
     echo "=========================================="
-    echo "    SMTP Relay Installer v$RELEASE_VERSION"
+    echo "    SMTP Relay Installer"
     echo "=========================================="
     echo
     
     check_root
     detect_system
     install_dependencies
+    
+    # Get the latest version
+    RELEASE_VERSION=$(get_latest_version)
+    
     create_service_user
-    install_binary
+    install_binary "$RELEASE_VERSION"
     create_config
     create_directories
     create_systemd_service
     create_startup_script
     create_uninstall_script
-    show_post_install_instructions
+    show_post_install_instructions "$RELEASE_VERSION"
 }
 
 # Run main function
