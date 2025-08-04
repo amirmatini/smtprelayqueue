@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # SMTP Relay Installer Script
-# Version: 1.8.0
+# Version: 1.8.1
 # Usage: curl -sSL https://raw.githubusercontent.com/amirmatini/smtprelayqueue/main/install.sh | bash
 
 set -e
@@ -15,7 +15,7 @@ NC='\033[0m' # No Color
 
 # Configuration
 REPO_URL="https://github.com/amirmatini/smtprelayqueue"
-RELEASE_VERSION="v1.8.0"
+RELEASE_VERSION="v1.8.1"
 INSTALL_DIR="/opt/smtp-relay"
 SERVICE_USER="smtp-relay"
 SERVICE_GROUP="smtp-relay"
